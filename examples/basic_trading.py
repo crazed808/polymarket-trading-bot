@@ -4,18 +4,24 @@ Basic Trading Examples
 
 Demonstrates common trading operations with the trading bot.
 
-Run this script after running:
-    python scripts/setup.py
+Usage:
+    python examples/basic_trading.py
 """
 
+import os
 import asyncio
 import sys
 from pathlib import Path
+
+# Auto-load .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.bot import TradingBot
+from src.config import Config
 
 
 async def main():
@@ -24,9 +30,15 @@ async def main():
     print("Basic Trading Examples")
     print("=" * 50)
 
-    # Initialize the bot
-    # Make sure to run scripts/setup.py first!
-    bot = TradingBot(config_path="config.yaml")
+    # Check credentials
+    private_key = os.environ.get("POLY_PRIVATE_KEY")
+    if not private_key:
+        print("\nError: POLY_PRIVATE_KEY not set in .env file")
+        sys.exit(1)
+
+    # Initialize the bot from environment
+    config = Config.from_env()
+    bot = TradingBot(config=config, private_key=private_key)
 
     print(f"\nBot initialized with Safe: {bot.config.safe_address}")
     print(f"Gasless mode: {bot.config.use_gasless}")
@@ -84,10 +96,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nInterrupted.")
-    except FileNotFoundError as e:
-        print(f"\nError: {e}")
-        print("\nPlease run scripts/setup.py first to configure the bot.")
-        sys.exit(1)
     except Exception as e:
         print(f"\nError: {e}")
         sys.exit(1)

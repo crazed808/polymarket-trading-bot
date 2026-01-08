@@ -306,6 +306,22 @@ class OrderSigner:
         )
         return self.sign_order(order)
 
+    def sign_message(self, message: str) -> str:
+        """
+        Sign a plain text message (for API key derivation).
+
+        Args:
+            message: Plain text message to sign
+
+        Returns:
+            Hex-encoded signature
+        """
+        from eth_account.messages import encode_defunct
+
+        signable = encode_defunct(text=message)
+        signed = self.wallet.sign_message(signable)
+        return "0x" + signed.signature.hex()
+
 
 # Alias for backwards compatibility
 WalletSigner = OrderSigner

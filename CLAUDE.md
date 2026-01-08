@@ -131,6 +131,11 @@ Key fields:
 - Prices are 0-1 (probability percentages)
 - USDC has 6 decimal places
 
+**Important**: The `docs/` directory contains official Polymarket documentation. When implementing or debugging API features, always reference:
+- `docs/developers/CLOB/` - CLOB API endpoints, authentication, orders
+- `docs/developers/builders/` - Builder Program, Relayer, gasless transactions
+- `docs/api-reference/` - REST API endpoint specifications
+
 ## For Beginners
 
 Start with these files in order:

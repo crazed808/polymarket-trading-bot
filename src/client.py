@@ -30,6 +30,7 @@ Example:
 import time
 import hmac
 import hashlib
+import base64
 import json
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
@@ -110,7 +111,7 @@ class ApiClient:
         self,
         method: str,
         endpoint: str,
-        data: Optional[Dict] = None,
+        data: Optional[Any] = None,
         headers: Optional[Dict] = None,
         params: Optional[Dict] = None
     ) -> Dict[str, Any]:
@@ -256,12 +257,126 @@ class ClobClient(ApiClient):
                 "POLY_BUILDER_SIGNATURE": signature,
             })
 
-        # User API credentials
+        # User API credentials (L2 authentication)
         if self.api_creds and self.api_creds.is_valid():
-            # L2 authentication would go here
-            pass
+            timestamp = str(int(time.time()))
+
+            # Build message: timestamp + method + path + body
+            message = f"{timestamp}{method}{path}"
+            if body:
+                message += body
+
+            # Decode base64 secret and create HMAC signature
+            try:
+                base64_secret = base64.urlsafe_b64decode(self.api_creds.secret)
+                h = hmac.new(base64_secret, message.encode("utf-8"), hashlib.sha256)
+                signature = base64.urlsafe_b64encode(h.digest()).decode("utf-8")
+            except Exception:
+                # Fallback: use secret directly if not base64 encoded
+                signature = hmac.new(
+                    self.api_creds.secret.encode(),
+                    message.encode(),
+                    hashlib.sha256
+                ).hexdigest()
+
+            headers.update({
+                "POLY_ADDRESS": self.funder,
+                "POLY_API_KEY": self.api_creds.api_key,
+                "POLY_TIMESTAMP": timestamp,
+                "POLY_PASSPHRASE": self.api_creds.passphrase,
+                "POLY_SIGNATURE": signature,
+            })
 
         return headers
+
+    def derive_api_key(self, signer: "OrderSigner", nonce: int = 0) -> ApiCredentials:
+        """
+        Derive L2 API credentials using L1 EIP-712 authentication.
+
+        This is required to access authenticated endpoints like
+        /orders and /trades.
+
+        Args:
+            signer: OrderSigner instance with private key
+            nonce: Nonce for the auth message (default 0)
+
+        Returns:
+            ApiCredentials with api_key, secret, and passphrase
+        """
+        timestamp = str(int(time.time()))
+
+        # Sign the auth message using EIP-712
+        auth_signature = signer.sign_auth_message(timestamp=timestamp, nonce=nonce)
+
+        # L1 headers
+        headers = {
+            "POLY_ADDRESS": signer.address,
+            "POLY_SIGNATURE": auth_signature,
+            "POLY_TIMESTAMP": timestamp,
+            "POLY_NONCE": str(nonce),
+        }
+
+        response = self._request("GET", "/auth/derive-api-key", headers=headers)
+
+        return ApiCredentials(
+            api_key=response.get("apiKey", ""),
+            secret=response.get("secret", ""),
+            passphrase=response.get("passphrase", ""),
+        )
+
+    def create_api_key(self, signer: "OrderSigner", nonce: int = 0) -> ApiCredentials:
+        """
+        Create new L2 API credentials using L1 EIP-712 authentication.
+
+        Use this if derive_api_key fails (first time setup).
+
+        Args:
+            signer: OrderSigner instance with private key
+            nonce: Nonce for the auth message (default 0)
+
+        Returns:
+            ApiCredentials with api_key, secret, and passphrase
+        """
+        timestamp = str(int(time.time()))
+
+        # Sign the auth message using EIP-712
+        auth_signature = signer.sign_auth_message(timestamp=timestamp, nonce=nonce)
+
+        # L1 headers
+        headers = {
+            "POLY_ADDRESS": signer.address,
+            "POLY_SIGNATURE": auth_signature,
+            "POLY_TIMESTAMP": timestamp,
+            "POLY_NONCE": str(nonce),
+        }
+
+        response = self._request("POST", "/auth/api-key", headers=headers)
+
+        return ApiCredentials(
+            api_key=response.get("apiKey", ""),
+            secret=response.get("secret", ""),
+            passphrase=response.get("passphrase", ""),
+        )
+
+    def create_or_derive_api_key(self, signer: "OrderSigner", nonce: int = 0) -> ApiCredentials:
+        """
+        Create API credentials if not exists, otherwise derive them.
+
+        Args:
+            signer: OrderSigner instance with private key
+            nonce: Nonce for the auth message (default 0)
+
+        Returns:
+            ApiCredentials with api_key, secret, and passphrase
+        """
+        try:
+            return self.create_api_key(signer, nonce)
+        except Exception:
+            return self.derive_api_key(signer, nonce)
+
+    def set_api_creds(self, creds: ApiCredentials) -> None:
+        """Set API credentials for authenticated requests."""
+        self.api_creds = creds
 
     def get_order_book(self, token_id: str) -> Dict[str, Any]:
         """
@@ -275,7 +390,8 @@ class ClobClient(ApiClient):
         """
         return self._request(
             "GET",
-            f"/orderbook/{token_id}"
+            "/book",
+            params={"token_id": token_id}
         )
 
     def get_market_price(self, token_id: str) -> Dict[str, Any]:
@@ -290,7 +406,8 @@ class ClobClient(ApiClient):
         """
         return self._request(
             "GET",
-            f"/price/{token_id}"
+            "/price",
+            params={"token_id": token_id}
         )
 
     def get_open_orders(self) -> List[Dict[str, Any]]:
@@ -300,17 +417,20 @@ class ClobClient(ApiClient):
         Returns:
             List of open orders
         """
-        endpoint = "/orders"
-        params = {"maker": self.funder}
+        endpoint = "/data/orders"
 
         headers = self._build_headers("GET", endpoint)
 
-        return self._request(
+        result = self._request(
             "GET",
             endpoint,
-            params=params,
             headers=headers
-        ) or []
+        )
+
+        # Handle paginated response
+        if isinstance(result, dict) and "data" in result:
+            return result.get("data", [])
+        return result if isinstance(result, list) else []
 
     def get_order(self, order_id: str) -> Dict[str, Any]:
         """
@@ -322,7 +442,9 @@ class ClobClient(ApiClient):
         Returns:
             Order details
         """
-        return self._request("GET", f"/order/{order_id}")
+        endpoint = f"/data/order/{order_id}"
+        headers = self._build_headers("GET", endpoint)
+        return self._request("GET", endpoint, headers=headers)
 
     def get_trades(
         self,
@@ -339,20 +461,20 @@ class ClobClient(ApiClient):
         Returns:
             List of trades
         """
-        endpoint = "/trades"
-        params = {"limit": str(limit)}
-
-        if token_id:
-            params["token_id"] = token_id
+        endpoint = "/data/trades"
 
         headers = self._build_headers("GET", endpoint)
 
-        return self._request(
+        result = self._request(
             "GET",
             endpoint,
-            params=params,
             headers=headers
-        ) or []
+        )
+
+        # Handle paginated response
+        if isinstance(result, dict) and "data" in result:
+            return result.get("data", [])
+        return result if isinstance(result, list) else []
 
     def post_order(
         self,
@@ -402,7 +524,47 @@ class ClobClient(ApiClient):
         Returns:
             Cancellation response
         """
-        endpoint = f"/order/{order_id}"
+        endpoint = "/order"
+        body = {"orderID": order_id}
+        body_json = json.dumps(body, separators=(',', ':'))
+        headers = self._build_headers("DELETE", endpoint, body_json)
+
+        return self._request(
+            "DELETE",
+            endpoint,
+            data=body,
+            headers=headers
+        )
+
+    def cancel_orders(self, order_ids: List[str]) -> Dict[str, Any]:
+        """
+        Cancel multiple orders by their IDs.
+
+        Args:
+            order_ids: List of order IDs to cancel
+
+        Returns:
+            Cancellation response with canceled and not_canceled lists
+        """
+        endpoint = "/orders"
+        body_json = json.dumps(order_ids, separators=(',', ':'))
+        headers = self._build_headers("DELETE", endpoint, body_json)
+
+        return self._request(
+            "DELETE",
+            endpoint,
+            data=order_ids,
+            headers=headers
+        )
+
+    def cancel_all_orders(self) -> Dict[str, Any]:
+        """
+        Cancel all open orders.
+
+        Returns:
+            Cancellation response with canceled and not_canceled lists
+        """
+        endpoint = "/cancel-all"
         headers = self._build_headers("DELETE", endpoint)
 
         return self._request(
@@ -411,31 +573,36 @@ class ClobClient(ApiClient):
             headers=headers
         )
 
-    def cancel_all_orders(self, token_id: Optional[str] = None) -> Dict[str, Any]:
+    def cancel_market_orders(
+        self,
+        market: Optional[str] = None,
+        asset_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Cancel all orders.
+        Cancel orders for a specific market.
 
         Args:
-            token_id: Cancel only orders for this token (optional)
+            market: Condition ID of the market (optional)
+            asset_id: Token/asset ID (optional)
 
         Returns:
-            Cancellation response
+            Cancellation response with canceled and not_canceled lists
         """
-        endpoint = "/orders"
-        params = {}
+        endpoint = "/cancel-market-orders"
+        body = {}
 
-        if token_id:
-            params["token_id"] = token_id
+        if market:
+            body["market"] = market
+        if asset_id:
+            body["asset_id"] = asset_id
 
-        body = {"maker": self.funder}
-        body_json = json.dumps(body, separators=(',', ':'))
+        body_json = json.dumps(body, separators=(',', ':')) if body else ""
         headers = self._build_headers("DELETE", endpoint, body_json)
 
         return self._request(
             "DELETE",
             endpoint,
-            data=body,
-            params=params,
+            data=body if body else None,
             headers=headers
         )
 

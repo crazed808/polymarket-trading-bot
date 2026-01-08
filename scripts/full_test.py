@@ -6,16 +6,12 @@ This script performs a complete integration test of all modules
 to verify the trading bot is working correctly.
 
 Usage:
-    # With environment variables
-    source .env
     python scripts/full_test.py
 
-    # Or set variables inline
-    POLY_PRIVATE_KEY=your_key POLY_SAFE_ADDRESS=0x... python scripts/full_test.py
+The script automatically loads .env file using python-dotenv.
 
 Requirements:
-    - Set POLY_PRIVATE_KEY environment variable
-    - Set POLY_SAFE_ADDRESS environment variable
+    - Create .env file with POLY_PRIVATE_KEY and POLY_SAFE_ADDRESS
     - Optionally set POLY_BUILDER_* for gasless testing
 """
 
@@ -23,6 +19,10 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+
+# Auto-load .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))

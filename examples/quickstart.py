@@ -7,14 +7,9 @@ Perfect for beginners who want to understand the basics.
 
 Prerequisites:
     1. Install dependencies: pip install -r requirements.txt
-    2. Set environment variables (see .env.example)
+    2. Create .env file with your credentials (see .env.example)
 
 Usage:
-    # Set your credentials
-    export POLY_PRIVATE_KEY=your_private_key
-    export POLY_SAFE_ADDRESS=0xYourSafeAddress
-
-    # Run this script
     python examples/quickstart.py
 """
 
@@ -22,6 +17,10 @@ import os
 import sys
 import asyncio
 from pathlib import Path
+
+# Auto-load .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 # Add project root to path (so we can import from src/)
 sys.path.insert(0, str(Path(__file__).parent.parent))

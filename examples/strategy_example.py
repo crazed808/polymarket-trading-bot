@@ -482,7 +482,23 @@ class GridTradingStrategy(BaseStrategy):
 # Example usage
 async def run_example_strategy():
     """Example of running a custom strategy."""
-    bot = TradingBot(config_path="config.yaml")
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    from src.config import Config
+
+    # Get credentials from environment
+    private_key = os.environ.get("POLY_PRIVATE_KEY")
+    safe_address = os.environ.get("POLY_SAFE_ADDRESS")
+
+    if not private_key or not safe_address:
+        print("Error: Set POLY_PRIVATE_KEY and POLY_SAFE_ADDRESS in .env file")
+        return
+
+    # Create config and bot
+    config = Config.from_env()
+    bot = TradingBot(config=config, private_key=private_key)
 
     # Create strategy with parameters
     strategy_params = {
@@ -497,17 +513,18 @@ async def run_example_strategy():
         params=strategy_params
     )
 
-    # Run for 1 hour (or until stopped)
-    tokens = [bot.config.default_token_id] if bot.config.default_token_id else []
-
-    if tokens:
-        print(f"Starting strategy on tokens: {tokens}")
-        await strategy.run(tokens, duration=3600)
-    else:
-        print("No tokens configured. Add default_token_id to config.yaml")
+    # Demo: Show strategy info
+    print(f"Strategy: {strategy.name}")
+    print(f"Parameters: {strategy_params}")
+    print(f"Bot initialized: {bot.is_initialized()}")
+    print(f"Signer address: {bot.signer.address if bot.signer else 'None'}")
+    print()
+    print("To run the strategy with a specific token:")
+    print("  await strategy.run(['TOKEN_ID'], duration=3600)")
 
 
 if __name__ == "__main__":
-    print("Strategy Template Example")
-    print("Run this after configuring the bot:")
-    print("  python examples/strategy_example.py")
+    print("=" * 50)
+    print("Strategy Example - Mean Reversion")
+    print("=" * 50)
+    asyncio.run(run_example_strategy())

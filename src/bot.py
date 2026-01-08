@@ -204,6 +204,10 @@ class TradingBot:
         # Initialize API clients
         self._init_clients()
 
+        # Auto-derive API credentials if we have a signer but no API creds
+        if self.signer and not self._api_creds:
+            self._derive_api_creds()
+
         logger.info(f"TradingBot initialized (gasless: {self.config.use_gasless})")
 
     def _load_encrypted_key(self, filepath: str, password: str) -> None:
@@ -228,6 +232,20 @@ class TradingBot:
                 logger.info(f"Loaded API credentials from {filepath}")
             except Exception as e:
                 logger.warning(f"Failed to load API credentials: {e}")
+
+    def _derive_api_creds(self) -> None:
+        """Derive L2 API credentials from signer."""
+        if not self.signer or not self.clob_client:
+            return
+
+        try:
+            logger.info("Deriving L2 API credentials...")
+            self._api_creds = self.clob_client.create_or_derive_api_key(self.signer)
+            self.clob_client.set_api_creds(self._api_creds)
+            logger.info("L2 API credentials derived successfully")
+        except Exception as e:
+            logger.warning(f"Failed to derive API credentials: {e}")
+            logger.warning("Some API endpoints may not be accessible")
 
     def _init_clients(self) -> None:
         """Initialize API clients."""
@@ -385,29 +403,50 @@ class TradingBot:
                 message=str(e)
             )
 
-    async def cancel_all_orders(
-        self,
-        token_id: Optional[str] = None
-    ) -> OrderResult:
+    async def cancel_all_orders(self) -> OrderResult:
         """
         Cancel all open orders.
-
-        Args:
-            token_id: Optional token ID to filter by
 
         Returns:
             OrderResult with cancellation status
         """
         try:
-            response = self.clob_client.cancel_all_orders(token_id)
-            logger.info(f"All orders cancelled (token: {token_id or 'all'})")
+            response = self.clob_client.cancel_all_orders()
+            logger.info("All orders cancelled")
             return OrderResult(
                 success=True,
-                message=f"Orders cancelled for {token_id or 'all tokens'}",
+                message="All orders cancelled",
                 data=response
             )
         except Exception as e:
             logger.error(f"Failed to cancel orders: {e}")
+            return OrderResult(success=False, message=str(e))
+
+    async def cancel_market_orders(
+        self,
+        market: Optional[str] = None,
+        asset_id: Optional[str] = None
+    ) -> OrderResult:
+        """
+        Cancel orders for a specific market.
+
+        Args:
+            market: Condition ID of the market (optional)
+            asset_id: Token/asset ID (optional)
+
+        Returns:
+            OrderResult with cancellation status
+        """
+        try:
+            response = self.clob_client.cancel_market_orders(market, asset_id)
+            logger.info(f"Market orders cancelled (market: {market or 'all'}, asset: {asset_id or 'all'})")
+            return OrderResult(
+                success=True,
+                message=f"Orders cancelled for market {market or 'all'}",
+                data=response
+            )
+        except Exception as e:
+            logger.error(f"Failed to cancel market orders: {e}")
             return OrderResult(success=False, message=str(e))
 
     async def get_open_orders(self) -> List[Dict[str, Any]]:
