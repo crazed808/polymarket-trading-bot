@@ -210,7 +210,8 @@ class OrderSigner:
             message_data=message_data
         )
 
-        signed = self.wallet.sign_message(signable)
+        message_hash = signable.has_struct()
+        signed = self.wallet.signHash(message_hash)
         return "0x" + signed.signature.hex()
 
     def sign_order(self, order: Order) -> Dict[str, Any]:

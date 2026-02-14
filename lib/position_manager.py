@@ -47,6 +47,12 @@ class Position:
     entry_time: float
     order_id: Optional[str] = None
 
+    # Actual USDC spent on buy (for accurate P&L)
+    usdc_spent: float = 0.0
+
+    # Market info for settlement lookup
+    market_slug: Optional[str] = None
+
     # TP/SL config (set by PositionManager)
     take_profit_delta: float = 0.10
     stop_loss_delta: float = 0.05
@@ -61,12 +67,39 @@ class Position:
         """Target price for stop loss."""
         return self.entry_price - self.stop_loss_delta
 
-    def get_pnl(self, current_price: float) -> float:
-        """Calculate unrealized PnL."""
+    def get_pnl(self, current_price: float, include_spread: bool = True) -> float:
+        """
+        Calculate unrealized PnL.
+
+        Args:
+            current_price: Current mid-price
+            include_spread: If True, subtract estimated spread cost (~2%) for realistic P&L
+
+        Returns:
+            Estimated P&L in dollars
+        """
+        if self.usdc_spent > 0:
+            # Use actual USDC spent for more accurate P&L
+            gross_value = current_price * self.size
+            if include_spread:
+                # Subtract ~2% spread cost (you sell at bid, not mid)
+                spread_cost = gross_value * 0.02
+                return gross_value - spread_cost - self.usdc_spent
+            return gross_value - self.usdc_spent
+        # Fallback to old calculation if usdc_spent not tracked
         return (current_price - self.entry_price) * self.size
 
-    def get_pnl_percent(self, current_price: float) -> float:
-        """Calculate PnL as percentage."""
+    def get_pnl_percent(self, current_price: float, include_spread: bool = True) -> float:
+        """
+        Calculate PnL as percentage.
+
+        Args:
+            current_price: Current mid-price
+            include_spread: If True, account for spread cost
+        """
+        if self.usdc_spent > 0:
+            pnl = self.get_pnl(current_price, include_spread)
+            return (pnl / self.usdc_spent) * 100
         if self.entry_price > 0:
             return (current_price - self.entry_price) / self.entry_price * 100
         return 0.0
@@ -93,10 +126,12 @@ class PositionManager:
     - Open positions
     - Realized and unrealized PnL
     - Trade statistics
+
+    Note: take_profit and stop_loss are PERCENTAGES (0.10 = 10%, 0.04 = 4%)
     """
 
-    take_profit: float = 0.10  # +10 cents
-    stop_loss: float = 0.05  # -5 cents
+    take_profit: float = 0.10  # +10% default
+    stop_loss: float = 0.05  # -5% default
     max_positions: int = 1  # Max concurrent positions
 
     # State
@@ -140,6 +175,10 @@ class PositionManager:
         entry_price: float,
         size: float,
         order_id: Optional[str] = None,
+        take_profit: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        usdc_spent: float = 0.0,
+        market_slug: Optional[str] = None,
     ) -> Optional[Position]:
         """
         Open a new position.
@@ -150,6 +189,10 @@ class PositionManager:
             entry_price: Entry price
             size: Position size
             order_id: Optional order ID
+            take_profit: Optional per-trade TP (as percentage, e.g., 0.04 = 4%)
+            stop_loss: Optional per-trade SL (as percentage, e.g., 0.03 = 3%)
+            usdc_spent: Actual USDC spent on buy (for accurate P&L)
+            market_slug: Market slug for settlement lookup
 
         Returns:
             Position if opened, None if at max positions
@@ -163,6 +206,16 @@ class PositionManager:
 
         pos_id = str(uuid.uuid4())[:8]
 
+        # Use per-trade TP/SL if provided, otherwise use manager defaults
+        # Convert percentage to absolute delta based on entry price
+        tp_pct = take_profit if take_profit is not None else self.take_profit
+        sl_pct = stop_loss if stop_loss is not None else self.stop_loss
+
+        # Calculate TP/SL deltas from entry price
+        # Note: Don't add spread adjustment to TP - it prevents wins
+        tp_delta = entry_price * tp_pct
+        sl_delta = entry_price * sl_pct
+
         position = Position(
             id=pos_id,
             side=side,
@@ -171,8 +224,10 @@ class PositionManager:
             size=size,
             entry_time=time.time(),
             order_id=order_id,
-            take_profit_delta=self.take_profit,
-            stop_loss_delta=self.stop_loss,
+            usdc_spent=usdc_spent,
+            market_slug=market_slug,
+            take_profit_delta=tp_delta,
+            stop_loss_delta=sl_delta,
         )
 
         self._positions[pos_id] = position

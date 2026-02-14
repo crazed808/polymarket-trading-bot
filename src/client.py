@@ -611,6 +611,40 @@ class ClobClient(ApiClient):
             headers=headers
         )
 
+    def get_price_history(
+        self,
+        token_id: str,
+        fidelity: int = 1,
+        start_ts: Optional[int] = None,
+        end_ts: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get historical price data for a token.
+
+        Args:
+            token_id: Market token ID
+            fidelity: Time resolution in minutes (1, 5, 60, etc.)
+            start_ts: Start timestamp (epoch seconds, optional)
+            end_ts: End timestamp (epoch seconds, optional)
+
+        Returns:
+            List of price points with timestamp and price
+        """
+        params: Dict[str, Any] = {
+            "market": token_id,
+            "fidelity": fidelity
+        }
+        if start_ts:
+            params["startTs"] = start_ts
+        if end_ts:
+            params["endTs"] = end_ts
+
+        return self._request(
+            "GET",
+            "/prices-history",
+            params=params
+        )
+
 
 class RelayerClient(ApiClient):
     """
@@ -756,6 +790,39 @@ class RelayerClient(ApiClient):
             "tokenId": token_id,
             "spender": spender,
             "amount": str(amount),
+        }
+        body_json = json.dumps(body, separators=(',', ':'))
+        headers = self._build_headers("POST", endpoint, body_json)
+
+        return self._request(
+            "POST",
+            endpoint,
+            data=body,
+            headers=headers
+        )
+
+    def execute(
+        self,
+        safe_address: str,
+        transactions: List[Dict[str, str]],
+        description: str = "Execute transaction"
+    ) -> Dict[str, Any]:
+        """
+        Execute generic transactions via relayer.
+
+        Args:
+            safe_address: Safe wallet address
+            transactions: List of transaction dicts with 'to', 'data', 'value'
+            description: Description of the transaction
+
+        Returns:
+            Transaction response from relayer
+        """
+        endpoint = "/execute"
+        body = {
+            "safeAddress": safe_address,
+            "transactions": transactions,
+            "description": description
         }
         body_json = json.dumps(body, separators=(',', ':'))
         headers = self._build_headers("POST", endpoint, body_json)

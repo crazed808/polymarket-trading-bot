@@ -316,6 +316,23 @@ class MarketWebSocket:
                 self._on_error(e)
             return False
 
+    async def reconnect(self) -> bool:
+        """Disconnect and reconnect WebSocket to refresh subscriptions."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Reconnecting WebSocket for market change...")
+        
+        await self.disconnect()
+        await asyncio.sleep(0.5)
+        success = await self.connect()
+        
+        if success:
+            logger.info("WebSocket reconnected successfully")
+        else:
+            logger.error("Failed to reconnect WebSocket")
+        
+        return success
+
     async def disconnect(self) -> None:
         """Disconnect from WebSocket."""
         self._running = False
@@ -341,6 +358,19 @@ class MarketWebSocket:
             return False
 
         if replace:
+            # Unsubscribe from old assets first
+            if self._subscribed_assets and self.is_connected:
+                try:
+                    old_assets = list(self._subscribed_assets)
+                    unsubscribe_msg = {
+                        "assets_ids": old_assets,
+                        "type": "MARKET",
+                    }
+                    await self._ws.send(json.dumps(unsubscribe_msg))
+                    logger.info(f"Unsubscribed from {len(old_assets)} old assets")
+                except Exception as e:
+                    logger.warning(f"Failed to unsubscribe: {e}")
+            
             # Clear old subscriptions and cached data
             self._subscribed_assets.clear()
             self._orderbooks.clear()
@@ -357,6 +387,7 @@ class MarketWebSocket:
             "assets_ids": asset_ids,
             "type": "MARKET",
         }
+        logger.info(f"[WS] Subscribing to {len(asset_ids)} assets: {asset_ids[:1]}...")
 
         try:
             msg_json = json.dumps(subscribe_msg)

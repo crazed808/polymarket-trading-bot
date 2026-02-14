@@ -38,8 +38,16 @@ from enum import Enum
 
 from .config import Config, BuilderConfig
 from .signer import OrderSigner, Order
-from .client import ClobClient, RelayerClient, ApiCredentials
+from .client import ApiCredentials
+from py_clob_client.client import ClobClient as OfficialClobClient
+from py_clob_client.clob_types import OrderArgs, OrderType, MarketOrderArgs, BalanceAllowanceParams, AssetType
 from .crypto import KeyManager, CryptoError, InvalidPasswordError
+
+# Official Polymarket relayer client
+from py_builder_relayer_client.client import RelayClient
+from py_builder_relayer_client.models import SafeTransaction, OperationType, RelayerTransactionState
+from py_builder_signing_sdk.config import BuilderConfig as OfficialBuilderConfig
+from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 
 
 # Configure logging
@@ -166,13 +174,13 @@ class TradingBot:
         # Set log level
         logger.setLevel(log_level)
 
-        # Load configuration
+        # Load configuration (merge YAML with environment variables)
         if config_path:
-            self.config = Config.load(config_path)
+            self.config = Config.load_with_env(config_path)
         elif config:
             self.config = config
         else:
-            self.config = Config()
+            self.config = Config.from_env()
 
         # Override with provided parameters
         if safe_address:
@@ -184,7 +192,7 @@ class TradingBot:
         # Initialize components
         self.signer: Optional[OrderSigner] = None
         self.clob_client: Optional[ClobClient] = None
-        self.relayer_client: Optional[RelayerClient] = None
+        self.relayer_client: Optional[RelayClient] = None
         self._api_creds: Optional[ApiCredentials] = None
 
         # Load private key
@@ -234,34 +242,50 @@ class TradingBot:
         if not self.signer or not self.clob_client:
             return
 
-        try:
-            logger.info("Deriving L2 API credentials...")
-            self._api_creds = self.clob_client.create_or_derive_api_key(self.signer)
-            self.clob_client.set_api_creds(self._api_creds)
-            logger.info("L2 API credentials derived successfully")
-        except Exception as e:
-            logger.warning(f"Failed to derive API credentials: {e}")
-            logger.warning("Some API endpoints may not be accessible")
+        # API credentials are now handled in _init_clients
+        pass
 
     def _init_clients(self) -> None:
         """Initialize API clients."""
         # CLOB client
-        self.clob_client = ClobClient(
+        # Get private key from signer
+        pk = None
+        if self.signer and hasattr(self.signer, 'wallet'):
+            pk = self.signer.wallet.key.hex()
+        
+        if not pk:
+            raise ValueError("Private key required for ClobClient")
+        
+        self.clob_client = OfficialClobClient(
             host=self.config.clob.host,
+            key=pk,
             chain_id=self.config.clob.chain_id,
             signature_type=self.config.clob.signature_type,
             funder=self.config.safe_address,
-            api_creds=self._api_creds,
-            builder_creds=self.config.builder if self.config.use_gasless else None,
         )
+        
+        # Derive and set API credentials
+        creds = self.clob_client.create_or_derive_api_creds()
+        self.clob_client.set_api_creds(creds)
+        logger.info("API credentials set successfully")
 
         # Relayer client (for gasless)
         if self.config.use_gasless:
-            self.relayer_client = RelayerClient(
-                host=self.config.relayer.host,
+            # Convert our BuilderConfig to the official SDK's BuilderConfig
+            builder_creds = BuilderApiKeyCreds(
+                key=self.config.builder.api_key,
+                secret=self.config.builder.api_secret,
+                passphrase=self.config.builder.api_passphrase
+            )
+            official_builder_config = OfficialBuilderConfig(
+                local_builder_creds=builder_creds
+            )
+
+            self.relayer_client = RelayClient(
+                relayer_url=self.config.relayer.host,
                 chain_id=self.config.clob.chain_id,
-                builder_creds=self.config.builder,
-                tx_type=self.config.relayer.tx_type,
+                private_key=pk,
+                builder_config=official_builder_config
             )
             logger.info("Relayer client initialized (gasless enabled)")
 
@@ -295,55 +319,320 @@ class TradingBot:
         fee_rate_bps: int = 0
     ) -> OrderResult:
         """
-        Place a limit order.
-
+        Place a limit order using official SDK.
+        
         Args:
             token_id: Market token ID
             price: Price per share (0-1)
-            size: Number of shares
+            size: Size in shares or USD depending on SDK
             side: 'BUY' or 'SELL'
             order_type: Order type (GTC, GTD, FOK)
-            fee_rate_bps: Fee rate in basis points
+            fee_rate_bps: Fee rate in basis points (ignored, SDK handles this)
+            
+        Returns:
+            OrderResult with order status
+        """
+        try:
+            # Create order args for official SDK
+            logger.info(f"[ORDER] Creating order: {side} {size} @ {price} on token {token_id[:20]}...")
+            order_args = OrderArgs(
+                price=price,
+                size=size,
+                side=side.upper(),
+                token_id=token_id
+            )
+            
+            # Place order using official SDK (creates AND posts to exchange)
+            logger.info(f"[ORDER] Calling create_and_post_order...")
+            response = await self._run_in_thread(
+                self.clob_client.create_and_post_order,
+                order_args
+            )
+            
+            logger.info(f"[ORDER] Response type: {type(response)}, response: {response}")
+            logger.info(f"Order placed: {side} {size} @ {price}")
+            
+            # Convert SignedOrder to dict if needed
+            if hasattr(response, 'dict'):
+                response_dict = response.dict()
+            elif isinstance(response, dict):
+                response_dict = response
+            else:
+                response_dict = {"response": str(response)}
+            
+            order_id = response_dict.get("orderID", "") or response_dict.get("order_id", "")
+            
+            return OrderResult(
+                success=True,
+                order_id=str(order_id),
+                message=f"Order placed successfully",
+                data=response_dict
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to place order: {e}", exc_info=True)
+            logger.error(f"[ORDER] Error details - token_id: {token_id}, price: {price}, size: {size}, side: {side}")
+            return OrderResult(
+                success=False,
+                message=f"Order failed: {str(e)}"
+            )
+
+    async def pre_warm_token(self, token_id: str):
+        """Pre-cache tick_size, neg_risk, and fee_rate for a token to avoid
+        API lookups during time-critical order creation."""
+        try:
+            await self._run_in_thread(self.clob_client.get_tick_size, token_id)
+            await self._run_in_thread(self.clob_client.get_neg_risk, token_id)
+            await self._run_in_thread(self.clob_client.get_fee_rate_bps, token_id)
+            logger.debug(f"[PRE-WARM] Cached tick_size/neg_risk/fee_rate for {token_id[:20]}...")
+        except Exception as e:
+            logger.warning(f"[PRE-WARM] Failed for {token_id[:20]}: {e}")
+
+    async def create_signed_order(
+        self,
+        token_id: str,
+        price: float,
+        size: float,
+        side: str,
+    ):
+        """Create and sign an order WITHOUT posting it. Returns the signed
+        order object that can later be posted with post_signed_order().
+
+        Call pre_warm_token() first to ensure SDK caches are populated."""
+        order_args = OrderArgs(
+            price=price,
+            size=size,
+            side=side.upper(),
+            token_id=token_id
+        )
+        signed_order = await self._run_in_thread(
+            self.clob_client.create_order,
+            order_args
+        )
+        return signed_order
+
+    async def post_signed_order(
+        self,
+        signed_order,
+        order_type: str = "GTC",
+    ) -> OrderResult:
+        """Post a previously signed order to the exchange.
+
+        Args:
+            signed_order: Order object returned by create_signed_order()
+            order_type: "GTC", "FOK", or "FAK" (Fill And Kill / IOC equivalent)
+        """
+        try:
+            response = await self._run_in_thread(
+                self.clob_client.post_order,
+                signed_order,
+                order_type
+            )
+
+            if hasattr(response, 'dict'):
+                response_dict = response.dict()
+            elif isinstance(response, dict):
+                response_dict = response
+            else:
+                response_dict = {"response": str(response)}
+
+            order_id = response_dict.get("orderID", "") or response_dict.get("order_id", "")
+
+            return OrderResult(
+                success=True,
+                order_id=str(order_id),
+                message="Order placed successfully",
+                data=response_dict
+            )
+        except Exception as e:
+            logger.error(f"Failed to post signed order: {e}", exc_info=True)
+            return OrderResult(
+                success=False,
+                message=f"Order post failed: {str(e)}"
+            )
+
+    async def place_market_order(
+        self,
+        token_id: str,
+        amount: float,
+        side: str,
+        worst_price: float = 0.0,
+    ) -> OrderResult:
+        """
+        Place a market order using FOK (Fill Or Kill).
+
+        Unlike limit orders, market orders fill immediately at the best available
+        price or fail entirely. This ensures we actually receive tokens before
+        opening a position.
+
+        Args:
+            token_id: Market token ID
+            amount: Amount in USD to spend (for BUY) or shares to sell (for SELL)
+            side: 'BUY' or 'SELL'
+            worst_price: Worst acceptable price (0 = any price)
 
         Returns:
             OrderResult with order status
         """
-        signer = self.require_signer()
-
         try:
-            # Create order
-            order = Order(
+            logger.info(f"[MARKET ORDER] Creating: {side} ${amount} on token {token_id[:20]}...")
+
+            # Create market order args (FOK by default)
+            market_args = MarketOrderArgs(
                 token_id=token_id,
-                price=price,
-                size=size,
-                side=side,
-                maker=self.config.safe_address,
-                fee_rate_bps=fee_rate_bps,
+                amount=amount,
+                side=side.upper(),
+                price=worst_price,  # 0 = any price
             )
 
-            # Sign order
-            signed = signer.sign_order(order)
+            # Create signed market order
+            logger.info(f"[MARKET ORDER] Creating signed order...")
+            signed_order = await self._run_in_thread(
+                self.clob_client.create_market_order,
+                market_args
+            )
 
-            # Submit to CLOB
+            # Post the order
+            logger.info(f"[MARKET ORDER] Posting order...")
             response = await self._run_in_thread(
                 self.clob_client.post_order,
-                signed,
-                order_type,
+                signed_order,
+                "FOK"  # Fill Or Kill
             )
 
-            logger.info(
-                f"Order placed: {side} {size}@{price} "
-                f"(token: {token_id[:16]}...)"
-            )
+            logger.info(f"[MARKET ORDER] Response type: {type(response).__name__}")
+            logger.info(f"[MARKET ORDER] Response: {response}")
 
-            return OrderResult.from_response(response)
+            # Parse response
+            if isinstance(response, dict):
+                response_dict = response
+            elif hasattr(response, 'dict'):
+                response_dict = response.dict()
+            elif hasattr(response, '__dict__'):
+                response_dict = response.__dict__
+            else:
+                response_dict = {"response": str(response)}
+
+            # Log all keys for debugging
+            logger.info(f"[MARKET ORDER] Response keys: {list(response_dict.keys())}")
+
+            success = response_dict.get("success", True)
+            error_msg = response_dict.get("errorMsg", "") or response_dict.get("error_msg", "")
+            status = response_dict.get("status", "")
+            taking_amount = response_dict.get("takingAmount", "0") or response_dict.get("taking_amount", "0")
+            making_amount = response_dict.get("makingAmount", "0") or response_dict.get("making_amount", "0")
+
+            logger.info(f"[MARKET ORDER] Parsed: success={success}, status={status}, taking={taking_amount}, making={making_amount}, error={error_msg}")
+
+            # Check for FOK not filled error specifically
+            if error_msg and "FOK" in error_msg.upper() and "NOT" in error_msg.upper() and "FILLED" in error_msg.upper():
+                logger.warning(f"FOK order not filled: {error_msg}")
+                return OrderResult(
+                    success=False,
+                    message=f"FOK order not filled",
+                    data=response_dict
+                )
+
+            # Check for other errors in errorMsg
+            if error_msg and any(x in error_msg.upper() for x in ["ERROR", "INVALID", "NOT_ENOUGH"]):
+                logger.warning(f"Market order failed: {error_msg}")
+                return OrderResult(
+                    success=False,
+                    message=f"Market order failed: {error_msg}",
+                    data=response_dict
+                )
+
+            # Check for explicit server-side failure
+            if success is False:
+                logger.warning(f"Market order server error: {error_msg}")
+                return OrderResult(
+                    success=False,
+                    message=f"Server error: {error_msg}",
+                    data=response_dict
+                )
+
+            # For FOK orders, check status - "matched" means filled
+            # Other statuses like "delayed" or empty might still be valid
+            if status and status.lower() == "matched":
+                logger.info(f"FOK order matched (filled): status={status}")
+            elif status:
+                logger.info(f"Order status: {status}")
+
+            # Parse amounts for logging (but don't use for success/fail determination)
+            try:
+                taking_value = float(taking_amount) if taking_amount else 0
+                making_value = float(making_amount) if making_amount else 0
+            except (ValueError, TypeError):
+                taking_value = 0
+                making_value = 0
+
+            order_id = response_dict.get("orderID", "") or response_dict.get("order_id", "")
+
+            logger.info(f"Market order filled: taking={taking_amount}, making={making_amount}")
+
+            return OrderResult(
+                success=True,
+                order_id=str(order_id),
+                message="Market order filled",
+                data=response_dict
+            )
 
         except Exception as e:
-            logger.error(f"Failed to place order: {e}")
+            logger.error(f"Failed to place market order: {e}", exc_info=True)
             return OrderResult(
                 success=False,
-                message=str(e)
+                message=f"Market order failed: {str(e)}"
             )
+
+    async def get_balance_allowance(
+        self,
+        token_id: str,
+        asset_type: str = "CONDITIONAL"
+    ) -> Dict[str, Any]:
+        """
+        Get balance and allowance for a token.
+
+        Args:
+            token_id: Token ID to check
+            asset_type: "COLLATERAL" for USDC, "CONDITIONAL" for outcome tokens
+
+        Returns:
+            Dict with 'balance' and 'allowance' as strings
+        """
+        try:
+            # Convert string asset_type to enum
+            at = AssetType.COLLATERAL if asset_type == "COLLATERAL" else AssetType.CONDITIONAL
+            params = BalanceAllowanceParams(asset_type=at, token_id=token_id)
+            result = await self._run_in_thread(
+                self.clob_client.get_balance_allowance,
+                params
+            )
+            logger.debug(f"Balance/allowance for {token_id[:20] if token_id else 'USDC'}: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get balance/allowance: {e}")
+            return {"balance": "0", "allowance": "0"}
+
+    async def has_tokens(self, token_id: str, required_amount: float) -> bool:
+        """
+        Check if we have enough tokens to sell.
+
+        Args:
+            token_id: Token ID to check
+            required_amount: Amount needed
+
+        Returns:
+            True if balance >= required_amount
+        """
+        try:
+            ba = await self.get_balance_allowance(token_id, "CONDITIONAL")
+            balance = float(ba.get("balance", "0"))
+            has_enough = balance >= required_amount
+            logger.info(f"Token balance check: have {balance}, need {required_amount}, ok={has_enough}")
+            return has_enough
+        except Exception as e:
+            logger.error(f"Failed to check token balance: {e}")
+            return False
 
     async def place_orders(
         self,
@@ -415,7 +704,7 @@ class TradingBot:
             OrderResult with cancellation status
         """
         try:
-            response = await self._run_in_thread(self.clob_client.cancel_all_orders)
+            response = await self._run_in_thread(self.clob_client.cancel_all)
             logger.info("All orders cancelled")
             return OrderResult(
                 success=True,
@@ -465,7 +754,7 @@ class TradingBot:
             List of open orders
         """
         try:
-            orders = await self._run_in_thread(self.clob_client.get_open_orders)
+            orders = await self._run_in_thread(self.clob_client.get_orders)
             logger.debug(f"Retrieved {len(orders)} open orders")
             return orders
         except Exception as e:
@@ -564,6 +853,153 @@ class TradingBot:
         except Exception as e:
             logger.warning(f"Safe deployment failed (may already be deployed): {e}")
             return False
+
+    async def get_redeemable_positions(self) -> List[Dict[str, Any]]:
+        """
+        Get positions that can be redeemed (from resolved markets).
+
+        Returns:
+            List of redeemable positions with conditionId and other details
+        """
+        try:
+            import httpx
+            url = f"https://data-api.polymarket.com/positions"
+            params = {
+                "user": self.config.safe_address,
+                "redeemable": "true",
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, params=params, timeout=10.0)
+                response.raise_for_status()
+                positions = response.json()
+                logger.info(f"Found {len(positions)} redeemable positions")
+                return positions
+        except Exception as e:
+            logger.error(f"Failed to get redeemable positions: {e}")
+            return []
+
+    async def redeem_position(self, condition_id: str) -> bool:
+        """
+        Redeem a resolved position to get USDC back.
+
+        Args:
+            condition_id: The condition ID of the resolved market
+
+        Returns:
+            True if redemption was successful
+        """
+        try:
+            from web3 import Web3
+
+            # Contract addresses on Polygon
+            CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+            USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
+            # ABI for redeemPositions
+            CTF_ABI = [{
+                "name": "redeemPositions",
+                "type": "function",
+                "inputs": [
+                    {"name": "collateralToken", "type": "address"},
+                    {"name": "parentCollectionId", "type": "bytes32"},
+                    {"name": "conditionId", "type": "bytes32"},
+                    {"name": "indexSets", "type": "uint256[]"}
+                ],
+                "outputs": []
+            }]
+
+            w3 = Web3()
+            ctf_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(CTF_ADDRESS),
+                abi=CTF_ABI
+            )
+
+            # Encode the redeem call - redeem both outcomes [1, 2]
+            parent_collection_id = bytes(32)  # bytes32(0)
+            condition_id_bytes = bytes.fromhex(condition_id[2:] if condition_id.startswith("0x") else condition_id)
+            index_sets = [1, 2]  # Redeem both YES and NO positions
+
+            # Encode function call data using _encode_transaction_data (works with web3.py v6+)
+            call_data = ctf_contract.functions.redeemPositions(
+                Web3.to_checksum_address(USDC_ADDRESS),
+                parent_collection_id,
+                condition_id_bytes,
+                index_sets
+            )._encode_transaction_data()
+
+            # Execute via relayer for gasless transaction
+            if self.relayer_client:
+                # Create SafeTransaction object for the official client
+                redeem_tx = SafeTransaction(
+                    to=CTF_ADDRESS,
+                    operation=OperationType.Call,
+                    data=call_data,
+                    value="0"
+                )
+
+                # Execute transaction via official relayer client
+                response = await self._run_in_thread(
+                    self.relayer_client.execute,
+                    [redeem_tx],
+                    "Redeem positions"
+                )
+
+                logger.info(f"Redeem transaction submitted: ID={response.transaction_id}, Hash={response.transaction_hash}")
+
+                # Wait for transaction to be mined on-chain
+                logger.info("Waiting for transaction to be broadcast and mined...")
+                result = await self._run_in_thread(
+                    self.relayer_client.poll_until_state,
+                    response.transaction_id,
+                    [RelayerTransactionState.STATE_MINED.value, RelayerTransactionState.STATE_CONFIRMED.value],
+                    RelayerTransactionState.STATE_FAILED.value,
+                    max_polls=60,  # Wait up to 2 minutes
+                    poll_frequency=2000  # Poll every 2 seconds
+                )
+
+                if result:
+                    logger.info(f"Redemption successful! Final state: {result.get('state')}")
+                    logger.info(f"Transaction hash: {result.get('transactionHash')}")
+                    return True
+                else:
+                    logger.warning("Transaction failed or timed out")
+                    return False
+            else:
+                logger.warning("Relayer client not available for gasless redeem")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to redeem position {condition_id}: {e}")
+            return False
+
+    async def auto_redeem_all(self) -> int:
+        """
+        Automatically redeem all redeemable positions.
+
+        Returns:
+            Number of positions successfully redeemed
+        """
+        positions = await self.get_redeemable_positions()
+        if not positions:
+            return 0
+
+        redeemed = 0
+        condition_ids_processed = set()
+
+        for pos in positions:
+            condition_id = pos.get("conditionId")
+            if not condition_id or condition_id in condition_ids_processed:
+                continue
+
+            condition_ids_processed.add(condition_id)
+            value = pos.get("currentValue", 0)
+            logger.info(f"Redeeming position: {pos.get('title', 'Unknown')} (value: ${value:.2f})")
+
+            if await self.redeem_position(condition_id):
+                redeemed += 1
+
+        logger.info(f"Redeemed {redeemed} positions")
+        return redeemed
 
     def create_order_dict(
         self,

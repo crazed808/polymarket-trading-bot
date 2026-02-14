@@ -195,5 +195,15 @@ class FlashCrashStrategy(BaseStrategy):
         return format_countdown(mins, secs)
 
     def on_market_change(self, old_slug: str, new_slug: str) -> None:
-        """Handle market change - clear price history."""
+        """Handle market change - clear price history and positions."""
         self.prices.clear()
+        
+        # Force close any open positions (can't trade on old market)
+        positions = self.positions.get_all_positions()
+        if positions:
+            self.log(f"⚠ Market changed - force closing {len(positions)} positions from old market")
+            for pos in positions:
+                # Just remove from tracking since we can't actually sell on closed market
+                self.positions.close_position(pos.side)
+                pnl = pos.get_pnl(pos.entry_price)  # Assume no profit since can't close
+                self.log(f"⚠ Force closed {pos.side} position (unrealized PnL: ${pnl:+.2f})")

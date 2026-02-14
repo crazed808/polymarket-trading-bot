@@ -143,3 +143,81 @@ Start with these files in order:
 2. `examples/basic_trading.py` - Common operations
 3. `src/bot.py` - Read the TradingBot class
 4. `examples/strategy_example.py` - Custom strategy framework
+
+## Quick Commands
+
+```bash
+# Check account status (USDC, positions, orders)
+python scripts/quick_check.py status
+
+# Check recent activity
+python scripts/quick_check.py activity
+
+# Run momentum strategy (recommended - BTC only)
+python run_momentum_3coin.py --coin BTC --size 1.0 --log
+
+# Run momentum strategy (BTC + ETH)
+python run_momentum_3coin.py --coin BTC,ETH --size 1.0 --log
+
+# Check tick recorder status
+python scripts/tick_recorder.py status
+
+# Run realistic backtest
+python scripts/backtest_realistic.py
+```
+
+## Optimized Momentum Strategy - QUALITY_COMBO (Jan 2025)
+
+**🏆 Comprehensively optimized via testing 12+ strategy variations**
+
+**Quality_Combo Settings:**
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| Momentum threshold | 15% in 30s | Main momentum window |
+| Multi-timeframe | 8% in 10s | Short-term confirmation (CRITICAL) |
+| Momentum quality | Max 3% volatility | Filters choppy signals (CRITICAL) |
+| Trailing stop | Yes | Locks in profits from peak |
+| Orderbook ratio | 2.0x | Strict depth filtering |
+| Take profit | 6% | Achievable target |
+| Stop loss | 3% | Wider = better (counterintuitive!) |
+| Time stop | 80s | Exit if not hit TP/SL |
+| Max entry spread | 3% | Ensures good execution |
+
+**Performance (5-day BTC backtest, 2% spread cost):**
+- **Quality_Combo: +1.50%/trade, 60.5% win rate** ⭐
+- Multi-timeframe only: +1.29%/trade, 60.9% win rate
+- Baseline (old): +0.57%/trade, 55.8% win rate
+
+**Improvement: 2.6x better than baseline!**
+
+**Key Insights:**
+- Multi-timeframe confirmation is CRITICAL (+126% improvement)
+- Quality filtering removes unreliable signals
+- Trailing stops > fixed stops
+- Wider SL (3% vs 2.5%) paradoxically improves results
+
+**IMPORTANT:** Only run on BTC for best results. Strategy is now enabled by default in momentum.py.
+
+## Momentum Strategy Notes
+
+- Balances are in base units (6 decimals) - divide by 1,000,000
+- `--test-run` flag stops after one complete trade cycle
+- `--log` flag saves logs to `logs/momentum_*.log`
+- Safety features: balance sync retry, position age protection, cooldowns
+
+**Known issues fixed:**
+- Balance=0 bug: Added retry logic for blockchain sync delay
+- TP too high: Removed spread adjustment from TP calculation
+- Spread costs: Strategy accounts for ~2% round-trip spread
+
+## Strategy Context Files
+
+When working on a specific strategy, **always read its context file first** for design decisions, known issues, and edit history:
+
+- **Micro Snipe Bot**: [`MICRO_SNIPE_CONTEXT.md`](MICRO_SNIPE_CONTEXT.md) — covers `run_micro_snipe.py`, known issues (BAD FILL monitoring), and why certain fixes were rejected.
+
+## Claude Code Preferences
+
+- **Use Explore agent for searches**: When searching the codebase (finding implementations, understanding patterns, locating files), use the Task tool with `subagent_type=Explore` instead of multiple Glob/Grep calls. This is more efficient.
+- **Haiku for simple tasks**: Use `model: "haiku"` for straightforward agent tasks to reduce cost/latency.

@@ -374,6 +374,7 @@ class MarketManager:
             if not self._running:
                 break
 
+
             old_market = self.current_market
             old_tokens = set(old_market.token_ids.values()) if old_market else set()
             old_slug = old_market.slug if old_market else None
@@ -397,9 +398,27 @@ class MarketManager:
             if not self._should_switch_market(old_market, market):
                 continue
 
-            # Market changed - resubscribe to new tokens
-            await self.ws.subscribe(list(new_tokens), replace=True)
+            # Market changed - reconnect WebSocket to get fresh orderbook
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Market switching: reconnecting WebSocket")
+            
+            # Stop current WebSocket
+            self.ws.stop()
+            await asyncio.sleep(0.5)
+            
+            # Update to new market
             self._update_current_market(market)
+            
+            # Reconnect WebSocket (will setup callbacks and subscribe)
+            if not await self._setup_websocket():
+                logger.error("Failed to reconnect WebSocket")
+                continue
+            
+            # Restart WebSocket task
+            if self._ws_task:
+                self._ws_task.cancel()
+            self._ws_task = asyncio.create_task(self._run_websocket())
 
             # Fire market change callbacks in main thread
             if old_slug and old_slug != market.slug:
@@ -408,6 +427,7 @@ class MarketManager:
                         callback(old_slug, market.slug)
                     except Exception:
                         pass
+
 
     async def start(self) -> bool:
         """
