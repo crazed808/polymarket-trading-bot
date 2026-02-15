@@ -448,7 +448,7 @@ class SettlementSniper5m:
                 up_token = tokens.get('up', '')
                 down_token = tokens.get('down', '')
                 fraction = self.config.balance_fraction
-                max_p = self.config.max_price
+                max_p = min(self.config.max_price, 0.99)  # SDK max is 0.99
                 shares = int(self.usdc_balance * fraction / max_p)
                 if shares > 0 and up_token and down_token:
                     signed_up, signed_down = await asyncio.gather(
