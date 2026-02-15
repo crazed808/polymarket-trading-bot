@@ -95,6 +95,12 @@ class SnipeConfig:
     max_negative_momentum: float = -0.02
     min_orderbook_ratio: float = 1.5  # Still check orderbook pressure
 
+    # Probability stability check: reject entries where probability just spiked
+    # into the valid range (e.g. 83% -> 95% in 300ms = boundary trade, high reversal risk)
+    stability_check: bool = True
+    stability_lookback: float = 2.0   # Seconds to look back
+    stability_min_price: float = 0.90  # Side must have been >= this for the entire lookback
+
     # Stop-loss: stop bot after N losses (0 = disabled)
     max_losses: int = 0
 
@@ -528,6 +534,28 @@ class SettlementSniper:
                                  f"opposite side ({opposite_side}) was at {max_opposite:.1%} within last {lookback}s")
                     self.add_event(f"[{coin}] SKIP: Price spike trap (opposite was {max_opposite:.0%})", "red")
                     return
+
+        # Probability stability check: reject if this side's probability just spiked
+        # into the valid range. A rapid spike (e.g. 83% -> 95% in 300ms) means the
+        # underlying price is right at the boundary and can easily flip back.
+        if self.config.stability_check:
+            history_key_self = f"{market_slug}:{side}"
+            side_history = list(self.price_history.get(history_key_self, []))
+            if side_history:
+                lookback = self.config.stability_lookback
+                cutoff = current_time - lookback
+                recent_prices = [(t, p) for t, p in side_history if t >= cutoff]
+
+                if recent_prices:
+                    min_recent = min(p for _, p in recent_prices)
+                    if min_recent < self.config.stability_min_price:
+                        logger.warning(f"[{coin}] {side} REJECT STABILITY: "
+                                     f"min price in last {lookback}s was {min_recent:.1%} "
+                                     f"(need >= {self.config.stability_min_price:.0%}), "
+                                     f"current={mid:.1%}")
+                        self.momentum_skips += 1
+                        self.add_event(f"[{coin}] SKIP: Probability spike ({min_recent:.0%} -> {mid:.0%} in {lookback}s)", "yellow")
+                        return
 
         # Passed price check — log it
         logger.info(f"[{coin}] {side} CANDIDATE: mid={mid:.3f} ask={best_ask:.3f} tr={time_remaining:.1f}s spread={spread:.4f} bids={bid_depth:.0f} asks={ask_depth:.0f}")
@@ -1218,6 +1246,12 @@ async def main():
                         help='Fraction of balance to use per trade (0.5 = 50%%)')
     parser.add_argument('--max-losses', type=int, default=0,
                         help='Stop after N losses (0 = unlimited)')
+    parser.add_argument('--no-stability-check', action='store_true',
+                        help='Disable probability stability check')
+    parser.add_argument('--stability-lookback', type=float, default=2.0,
+                        help='Stability check lookback in seconds (default: 2.0)')
+    parser.add_argument('--stability-min', type=float, default=0.90,
+                        help='Min probability over lookback period (default: 0.90 = 90%%)')
 
     args = parser.parse_args()
 
@@ -1229,7 +1263,10 @@ async def main():
         min_price=args.min_price,
         max_price=args.max_price,
         balance_fraction=args.balance_fraction,
-        max_losses=args.max_losses
+        max_losses=args.max_losses,
+        stability_check=not args.no_stability_check,
+        stability_lookback=args.stability_lookback,
+        stability_min_price=args.stability_min,
     )
 
     # Get credentials from environment
